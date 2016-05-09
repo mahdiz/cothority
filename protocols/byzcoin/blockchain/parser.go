@@ -125,8 +125,10 @@ func EnsureBlockIsAvailable(dir string) error {
 		}
 	}
 	destDir := dir + "/blocks"
-	if err := os.Mkdir(destDir, 0777); err != nil {
-		return err
+	if _, err := os.Stat(destDir); err != nil {
+		if err := os.Mkdir(destDir, 0777); err != nil {
+			return err
+		}
 	}
 	cmd := exec.Command("cp", block, destDir)
 	if err := cmd.Start(); err != nil {
