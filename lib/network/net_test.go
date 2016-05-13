@@ -2,7 +2,6 @@ package network
 
 import (
 	"fmt"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -53,16 +52,6 @@ func TestRegister(t *testing.T) {
 	}
 	if TypeFromData(TestRegisterS{}) != trType {
 		t.Fatal("TestRegister is different now")
-	}
-}
-
-func TestRegisterReflect(t *testing.T) {
-	defer dbg.AfterTest(t)
-
-	typ := RegisterMessageType(TestRegisterS{})
-	typReflect := RTypeToMessageTypeID(reflect.TypeOf(TestRegisterS{}))
-	if typ != typReflect {
-		t.Fatal("Register does not work")
 	}
 }
 

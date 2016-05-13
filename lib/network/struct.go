@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/dedis/cothority/lib/crypto"
-	"github.com/dedis/cothority/lib/dbg"
 	"github.com/dedis/cothority/lib/monitor"
 	"github.com/dedis/crypto/abstract"
 	"github.com/dedis/protobuf"
@@ -256,9 +255,7 @@ func (e *Entity) Equal(e2 *Entity) bool {
 // Toml converts an Entity to a Toml-structure
 func (e *Entity) Toml(suite abstract.Suite) *EntityToml {
 	var buf bytes.Buffer
-	if err := crypto.WritePub64(suite, &buf, e.Public); err != nil {
-		dbg.Error("Error while writing public key:", err)
-	}
+	crypto.WritePub64(suite, &buf, e.Public)
 	return &EntityToml{
 		Addresses: e.Addresses,
 		Public:    buf.String(),
@@ -267,10 +264,7 @@ func (e *Entity) Toml(suite abstract.Suite) *EntityToml {
 
 // Entity converts an EntityToml structure back to an Entity
 func (e *EntityToml) Entity(suite abstract.Suite) *Entity {
-	pub, err := crypto.ReadPub64(suite, strings.NewReader(e.Public))
-	if err != nil {
-		dbg.Error("Error while reading public key:", err)
-	}
+	pub, _ := crypto.ReadPub64(suite, strings.NewReader(e.Public))
 	return &Entity{
 		Public:    pub,
 		Addresses: e.Addresses,

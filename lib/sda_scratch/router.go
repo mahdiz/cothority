@@ -2,11 +2,12 @@ package sda2
 
 import (
 	"errors"
+	"sync"
+	"time"
+
 	"github.com/dedis/cothority/lib/dbg"
 	"github.com/dedis/cothority/lib/network"
 	"golang.org/x/net/context"
-	"sync"
-	"time"
 )
 
 // Router is the interface that is responsible for handling incoming and
@@ -178,15 +179,6 @@ func (tr *tcpRouter) Close() error {
 	/*if h.processMessagesStarted {*/
 	//// Tell ProcessMessages to quit
 	//close(h.ProcessMessagesQuit)
-	/*}*/
-	// XXX TCPHost.Close already closes all connections ...
-	/*for _, c := range h.connections {*/
-	//dbg.Lvl3(h.Entity.First(), "Closing connection", c)
-	//err := c.Close()
-	//if err != nil {
-	//dbg.Error(h.Entity.First(), "Couldn't close connection", c)
-	//return err
-	//}
 	/*}*/
 	err := tr.tcpHost.Close()
 	tr.conns.Empty()
