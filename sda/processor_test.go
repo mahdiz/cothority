@@ -1,11 +1,11 @@
 package sda
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"reflect"
-
-	"errors"
 
 	"github.com/dedis/cothority/log"
 	"github.com/dedis/cothority/network"
@@ -13,15 +13,18 @@ import (
 )
 
 var testServiceID ServiceID
+var testMsgID network.PacketTypeID
 
 func init() {
 	RegisterNewService("testService", newTestService)
 	testServiceID = ServiceFactory.ServiceID("testService")
+	testMsgID = network.RegisterPacketType(&testMsg{})
 }
 
 func TestProcessor_AddMessage(t *testing.T) {
-	defer log.AfterTest(t)
-	p := NewServiceProcessor(nil)
+	h1 := NewLocalConode(2000)
+	defer h1.Close()
+	p := NewServiceProcessor(&Context{conode: h1})
 	log.ErrFatal(p.RegisterMessage(procMsg))
 	if len(p.functions) != 1 {
 		t.Fatal("Should have registered one function")
@@ -47,15 +50,25 @@ func TestProcessor_AddMessage(t *testing.T) {
 	}
 }
 
+func TestProcessor_RegisterMessages(t *testing.T) {
+	p := NewServiceProcessor(&Context{})
+	log.ErrFatal(p.RegisterMessages(procMsg, procMsg2))
+	err := p.RegisterMessages(procMsg, procMsgWrong1)
+	if err == nil {
+		t.Fatal("Registered wrong message and didn't get an error")
+	}
+}
+
 func TestProcessor_GetReply(t *testing.T) {
-	defer log.AfterTest(t)
-	p := NewServiceProcessor(nil)
+	h1 := NewLocalConode(2000)
+	defer h1.Close()
+	p := NewServiceProcessor(&Context{conode: h1})
 	log.ErrFatal(p.RegisterMessage(procMsg))
 
 	pair := config.NewKeyPair(network.Suite)
 	e := network.NewServerIdentity(pair.Public, "")
 
-	rep := p.GetReply(e, mkClientRequest(&testMsg{11}))
+	rep := p.GetReply(e, testMsgID, testMsg{11})
 	val, ok := rep.(*testMsg)
 	if !ok {
 		t.Fatalf("Couldn't cast reply to testMsg: %+v", rep)
@@ -64,8 +77,8 @@ func TestProcessor_GetReply(t *testing.T) {
 		t.Fatal("Value got lost - should be 11")
 	}
 
-	rep = p.GetReply(e, mkClientRequest(&testMsg{42}))
-	errMsg, ok := rep.(*StatusRet)
+	rep = p.GetReply(e, testMsgID, testMsg{42})
+	errMsg, ok := rep.(*network.StatusRet)
 	if !ok {
 		t.Fatal("42 should return an error")
 	}
@@ -75,29 +88,32 @@ func TestProcessor_GetReply(t *testing.T) {
 }
 
 func TestProcessor_ProcessClientRequest(t *testing.T) {
-	defer log.AfterTest(t)
 	local := NewLocalTest()
 
-	// generate 5 hosts, they don't connect, they process messages, and they
-	// don't register the tree or entitylist
-	h := local.GenLocalHosts(1, false, false)[0]
+	// generate 5 hosts,
+	h := local.GenConodes(1)[0]
 	defer local.CloseAll()
 
 	s := local.Services[h.ServerIdentity.ID]
 	ts := s[testServiceID]
-	cr := &ClientRequest{Data: mkClientRequest(&testMsg{12})}
-	ts.ProcessClientRequest(h.ServerIdentity, cr)
+	client := local.NewClient("testService")
+
+	resp, err := client.Send(h.ServerIdentity, &testMsg{12})
+	if err != nil {
+		t.Fatal("error sending /receiving with client")
+	}
 	msg := ts.(*testService).Msg
 	if msg == nil {
 		t.Fatal("Msg should not be nil")
 	}
-	tm, ok := msg.(*testMsg)
+	tm, ok := resp.Msg.(testMsg)
 	if !ok {
 		t.Fatalf("Couldn't cast to *testMsg - %+v", tm)
 	}
 	if tm.I != 12 {
 		t.Fatal("Didn't send 12")
 	}
+
 }
 
 func mkClientRequest(msg network.Body) []byte {
@@ -110,10 +126,18 @@ type testMsg struct {
 	I int
 }
 
-func procMsg(e *network.ServerIdentity, msg *testMsg) (network.Body, error) {
+func procMsg(si *network.ServerIdentity, msg *testMsg) (network.Body, error) {
 	// Return an error for testing
 	if msg.I == 42 {
-		return nil, errors.New("6 * 9 != 42")
+		return nil, fmt.Errorf("ServiceProcessor received %d (actual) vs 42 (expected)", msg.I)
+	}
+	return msg, nil
+}
+
+func procMsg2(si *network.ServerIdentity, msg *testMsg) (network.Body, error) {
+	// Return an error for testing
+	if msg.I != 42 {
+		return nil, errors.New("Please give meaning of life.")
 	}
 	return msg, nil
 }
@@ -122,23 +146,23 @@ func procMsgWrong1(msg *testMsg) (network.Body, error) {
 	return msg, nil
 }
 
-func procMsgWrong2(e *network.ServerIdentity) (network.Body, error) {
+func procMsgWrong2(si *network.ServerIdentity) (network.Body, error) {
 	return nil, nil
 }
 
-func procMsgWrong3(e *network.ServerIdentity, msg testMsg) (network.Body, error) {
+func procMsgWrong3(si *network.ServerIdentity, msg testMsg) (network.Body, error) {
 	return msg, nil
 }
 
-func procMsgWrong4(e *network.ServerIdentity, msg *testMsg) error {
+func procMsgWrong4(si *network.ServerIdentity, msg *testMsg) error {
 	return nil
 }
 
-func procMsgWrong5(e *network.ServerIdentity, msg *testMsg) (error, network.Body) {
+func procMsgWrong5(si *network.ServerIdentity, msg *testMsg) (error, network.Body) {
 	return nil, msg
 }
 
-func procMsgWrong6(e *network.ServerIdentity, msg *int) (network.Body, error) {
+func procMsgWrong6(si *network.ServerIdentity, msg *int) (network.Body, error) {
 	return msg, nil
 }
 
@@ -159,11 +183,11 @@ func (ts *testService) NewProtocol(tn *TreeNodeInstance, conf *GenericConfig) (P
 	return nil, nil
 }
 
-func (ts *testService) ProcessMsg(e *network.ServerIdentity, msg *testMsg) (network.Body, error) {
+func (ts *testService) ProcessMsg(si *network.ServerIdentity, msg *testMsg) (network.Body, error) {
 	ts.Msg = msg
 	return msg, nil
 }
 
-func returnMsg(e *network.ServerIdentity, msg network.Body) (network.Body, error) {
+func returnMsg(si *network.ServerIdentity, msg network.Body) (network.Body, error) {
 	return msg, nil
 }

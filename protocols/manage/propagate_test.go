@@ -17,14 +17,14 @@ type PropagateMsg struct {
 }
 
 func init() {
-	network.RegisterMessageType(PropagateMsg{})
+	network.RegisterPacketType(PropagateMsg{})
 }
 
 // Tests an n-node system
 func TestPropagate(t *testing.T) {
-	for _, nbrNodes := range []int{3, 10, 14} {
+	for _, nbrNodes := range []int{3 /*10, 14*/} {
 		local := sda.NewLocalTest()
-		_, el, _ := local.GenTree(nbrNodes, false, true, true)
+		_, el, _ := local.GenTree(nbrNodes, true)
 		o := local.Overlays[el.List[0].ID]
 
 		i := 0
@@ -32,7 +32,7 @@ func TestPropagate(t *testing.T) {
 
 		tree := el.GenerateNaryTreeWithRoot(8, o.ServerIdentity())
 		log.Lvl2("Starting to propagate", reflect.TypeOf(msg))
-		pi, err := o.CreateProtocolSDA(tree, "Propagate")
+		pi, err := o.CreateProtocolSDA("Propagate", tree)
 		log.ErrFatal(err)
 		nodes, err := propagateStartAndWait(pi, msg, 1000,
 			func(m network.Body) {
@@ -50,5 +50,6 @@ func TestPropagate(t *testing.T) {
 			t.Fatal("Not all nodes replied")
 		}
 		local.CloseAll()
+		log.AfterTest(t)
 	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func init() {
-	sda.ProtocolRegisterName("Propagate", NewPropagateProtocol)
+	sda.GlobalProtocolRegister("Propagate", NewPropagateProtocol)
 }
 
 // Propagate is a protocol that sends some data to all attached nodes
@@ -57,8 +57,8 @@ type PropagateReply struct {
 // stored the new value or an error if the protocol couldn't start.
 func PropagateStartAndWait(c *sda.Context, el *sda.Roster, msg network.Body, msec int, f func(network.Body)) (int, error) {
 	tree := el.GenerateNaryTreeWithRoot(8, c.ServerIdentity())
-	log.Lvl2("Starting to propagate", reflect.TypeOf(msg))
-	pi, err := c.CreateProtocolService(tree, "Propagate")
+	log.Lvl3("Starting to propagate", reflect.TypeOf(msg))
+	pi, err := c.CreateProtocolService("Propagate", tree)
 	if err != nil {
 		return -1, err
 	}
@@ -84,7 +84,7 @@ func propagateStartAndWait(pi sda.ProtocolInstance, msg network.Body, msec int, 
 		return -1, err
 	}
 	ret := <-done
-	log.Lvl2("Finished propagation with", ret, "replies")
+	log.Lvl3("Finished propagation with", ret, "replies")
 	return ret, nil
 }
 
@@ -121,7 +121,8 @@ func (p *Propagate) Dispatch() error {
 		p.Unlock()
 		select {
 		case msg := <-p.ChannelSD:
-			log.Lvl3(p.ServerIdentity(), "Got data from", msg.ServerIdentity)
+			log.Lvl3(p.ServerIdentity(), "Got data from", msg.ServerIdentity, "and setting timeout to", msg.Msec)
+			p.sd.Msec = msg.Msec
 			if p.onData != nil {
 				_, netMsg, err := network.UnmarshalRegistered(msg.Data)
 				if err == nil {
@@ -148,7 +149,8 @@ func (p *Propagate) Dispatch() error {
 				process = false
 			}
 		case <-time.After(timeout):
-			log.Fatal("Timeout")
+			_, a, err := network.UnmarshalRegistered(p.sd.Data)
+			log.Fatalf("Timeout of %s reached. %v %s", timeout, a, err)
 			process = false
 		}
 	}

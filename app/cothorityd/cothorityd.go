@@ -56,7 +56,7 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:  "debug, d",
-			Value: 1,
+			Value: 0,
 			Usage: "debug-level: 1 for terse, 5 for maximal",
 		},
 	}
@@ -106,14 +106,11 @@ func runServer(ctx *cli.Context) {
 		log.Fatalf("[-] Configuration file does not exists. %s", config)
 	}
 	// Let's read the config
-	_, host, err := c.ParseCothorityd(config)
+	_, conode, err := c.ParseCothorityd(config)
 	if err != nil {
 		log.Fatal("Couldn't parse config:", err)
 	}
-	host.ListenAndBind()
-	host.StartProcessMessages()
-	host.WaitForClose()
-
+	conode.Start()
 }
 
 func getDefaultConfigFile() string {

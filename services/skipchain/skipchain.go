@@ -12,6 +12,11 @@ import (
 
 	"time"
 
+	"io/ioutil"
+	"os"
+
+	"fmt"
+
 	"github.com/dedis/cothority/log"
 	"github.com/dedis/cothority/network"
 	"github.com/dedis/cothority/protocols/bftcosi"
@@ -21,15 +26,19 @@ import (
 
 // ServiceName can be used to refer to the name of this service
 const ServiceName = "Skipchain"
+const skipchainBFT = "SkipchainBFT"
 
 func init() {
 	sda.RegisterNewService(ServiceName, newSkipchainService)
 	skipchainSID = sda.ServiceFactory.ServiceID(ServiceName)
-	sda.ProtocolRegisterName(skipchainBFT, func(n *sda.TreeNodeInstance) (sda.ProtocolInstance, error) {
+	sda.GlobalProtocolRegister(skipchainBFT, func(n *sda.TreeNodeInstance) (sda.ProtocolInstance, error) {
 		return bftcosi.NewBFTCoSiProtocol(n, nil)
 	})
+	network.RegisterPacketType(&SkipBlockMap{})
 }
 
+// XXX Why skipchainSID is private ? Should we not be able to access it from
+// outside ?
 var skipchainSID sda.ServiceID
 
 // Service handles adding new SkipBlocks
@@ -37,11 +46,18 @@ type Service struct {
 	*sda.ServiceProcessor
 	// SkipBlocks points from SkipBlockID to SkipBlock but SkipBlockID is not a valid
 	// key-type for maps, so we need to cast it to string
-	SkipBlocks map[string]*SkipBlock
-	sbMutex    sync.Mutex
-	path       string
+	*SkipBlockMap
+	gMutex    sync.Mutex
+	path      string
+	verifiers map[VerifierID]SkipBlockVerifier
+
 	// testVerify is set to true if a verification happened - only for testing
 	testVerify bool
+}
+
+// SkipBlockMap holds the map to the skipblocks so it can be marshaled.
+type SkipBlockMap struct {
+	SkipBlocks map[string]*SkipBlock
 }
 
 // ProposeSkipBlock takes a hash for the latest valid SkipBlock and a SkipBlock
@@ -50,7 +66,7 @@ type Service struct {
 // If the the latest block given is nil it verify if we are actually creating
 // the first (genesis) block and creates it. If it is called with nil although
 // there already exist previous blocks, it will return an error.
-func (s *Service) ProposeSkipBlock(e *network.ServerIdentity, psbd *ProposeSkipBlock) (network.Body, error) {
+func (s *Service) ProposeSkipBlock(si *network.ServerIdentity, psbd *ProposeSkipBlock) (network.Body, error) {
 	prop := psbd.Proposed
 	var prev *SkipBlock
 
@@ -120,6 +136,7 @@ func (s *Service) ProposeSkipBlock(e *network.ServerIdentity, psbd *ProposeSkipB
 	if err != nil {
 		return nil, errors.New("Verification error: " + err.Error())
 	}
+	s.save()
 
 	reply := &ProposedSkipBlockReply{
 		Previous: prev,
@@ -132,7 +149,7 @@ func (s *Service) ProposeSkipBlock(e *network.ServerIdentity, psbd *ProposeSkipB
 // skipchain from the latest block the caller knows of to the actual latest
 // SkipBlock.
 // Somehow comparable to search in SkipLists.
-func (s *Service) GetUpdateChain(e *network.ServerIdentity, latestKnown *GetUpdateChain) (network.Body, error) {
+func (s *Service) GetUpdateChain(si *network.ServerIdentity, latestKnown *GetUpdateChain) (network.Body, error) {
 	block, ok := s.getSkipBlockByID(latestKnown.LatestID)
 	if !ok {
 		return nil, errors.New("Couldn't find latest skipblock")
@@ -156,7 +173,7 @@ func (s *Service) GetUpdateChain(e *network.ServerIdentity, latestKnown *GetUpda
 
 // SetChildrenSkipBlock creates a new SkipChain if that 'service' doesn't exist
 // yet.
-func (s *Service) SetChildrenSkipBlock(e *network.ServerIdentity, scsb *SetChildrenSkipBlock) (network.Body, error) {
+func (s *Service) SetChildrenSkipBlock(si *network.ServerIdentity, scsb *SetChildrenSkipBlock) (network.Body, error) {
 	parentID := scsb.ParentID
 	childID := scsb.ChildID
 	parent, ok := s.getSkipBlockByID(parentID)
@@ -178,6 +195,7 @@ func (s *Service) SetChildrenSkipBlock(e *network.ServerIdentity, scsb *SetChild
 	// Parent-block is always of type roster, but child-block can be
 	// data or roster.
 	reply := &SetChildrenSkipBlockReply{parent, child}
+	s.save()
 
 	return reply, nil
 }
@@ -214,6 +232,40 @@ func (s *Service) PropagateSkipBlock(msg network.Body) {
 	}
 	s.storeSkipBlock(sb)
 	log.Lvlf3("Stored skip block %+v in %x", *sb, s.Context.ServerIdentity().ID[0:8])
+}
+
+// VerifyShardFunc makes sure that the cothority of the child-skipchain is
+// part of the root-cothority.
+func (s *Service) VerifyShardFunc(msg []byte, sb *SkipBlock) bool {
+	if sb.ParentBlockID.IsNull() {
+		log.Lvl3("No parent skipblock to verify against")
+		return false
+	}
+	sbParent, exists := s.getSkipBlockByID(sb.ParentBlockID)
+	if !exists {
+		log.Lvl3("Parent skipblock doesn't exist")
+		return false
+	}
+	for _, e := range sb.Roster.List {
+		if i, _ := sbParent.Roster.Search(e.ID); i < 0 {
+			log.Lvl3("ServerIdentity in child doesn't exist in parent")
+			return false
+		}
+	}
+	return true
+}
+
+// VerifyNoneFunc returns always true.
+func (s *Service) VerifyNoneFunc(msg []byte, sb *SkipBlock) bool {
+	log.Lvl4("No verification - accepted")
+	return true
+}
+
+// RegisterVerification stores the verification in a map and will
+// call it whenever a verification needs to be done.
+func (s *Service) RegisterVerification(v VerifierID, f SkipBlockVerifier) error {
+	s.verifiers[v] = f
+	return nil
 }
 
 // signNewSkipBlock should start a BFT-signature on the newest block
@@ -271,7 +323,6 @@ func (s *Service) signNewSkipBlock(latest, newest *SkipBlock) (*SkipBlock, *Skip
 }
 
 func (s *Service) startBFTSignature(block *SkipBlock) error {
-	log.Lvl3("Starting bftsignature with root-node=", s.ServerIdentity())
 	done := make(chan bool)
 	// create the message we want to sign for this round
 	msg := []byte(block.Hash)
@@ -289,7 +340,7 @@ func (s *Service) startBFTSignature(block *SkipBlock) error {
 	// Start the protocol
 	tree := el.GenerateNaryTreeWithRoot(2, s.ServerIdentity())
 
-	node, err := s.CreateProtocolService(tree, skipchainBFT)
+	node, err := s.CreateProtocolService(skipchainBFT, tree)
 	if err != nil {
 		return errors.New("Couldn't create new node: " + err.Error())
 	}
@@ -383,7 +434,7 @@ func (s *Service) startPropagation(blocks []*SkipBlock) error {
 			roster = sb.Roster
 		}
 		replies, err := manage.PropagateStartAndWait(s.Context, roster,
-			block, 1000, s.PropagateSkipBlock)
+			block, propagateTimeout, s.PropagateSkipBlock)
 		if err != nil {
 			return err
 		}
@@ -408,67 +459,92 @@ func (s *Service) bftVerify(msg []byte, data []byte) bool {
 		log.Lvlf2("Data skipBlock different from msg %x %x", msg, sb.Hash)
 		return false
 	}
-	switch sb.VerifierID {
-	case VerifyNone:
-		log.Lvl4("No verification - accepted")
-		return true
-	case VerifyShard:
-		if sb.ParentBlockID.IsNull() {
-			log.Lvl3("No parent skipblock to verify against")
-		} else {
-			sbParent, exists := s.getSkipBlockByID(sb.ParentBlockID)
-			if !exists {
-				log.Lvl3("Parent skipblock doesn't exist")
-			} else {
-				for _, e := range sb.Roster.List {
-					if i, _ := sbParent.Roster.Search(e.ID); i < 0 {
-						log.Lvl3("ServerIdentity in child doesn't exist in parent")
-						return false
-					}
-				}
-				return true
-			}
-		}
+
+	f, ok := s.verifiers[sb.VerifierID]
+	if !ok {
+		log.Lvlf2("Found no user verification for %x", sb.VerifierID)
+		return false
 	}
-	return false
+	return f(msg, sb)
 }
 
 // getSkipBlockByID returns the skip-block or false if it doesn't exist
 func (s *Service) getSkipBlockByID(sbID SkipBlockID) (*SkipBlock, bool) {
-	s.sbMutex.Lock()
+	s.gMutex.Lock()
 	b, ok := s.SkipBlocks[string(sbID)]
-	s.sbMutex.Unlock()
+	s.gMutex.Unlock()
 	return b, ok
 }
 
 // storeSkipBlock stores the given SkipBlock in the service-list
 func (s *Service) storeSkipBlock(sb *SkipBlock) SkipBlockID {
-	s.sbMutex.Lock()
+	s.gMutex.Lock()
 	s.SkipBlocks[string(sb.Hash)] = sb
-	s.sbMutex.Unlock()
+	s.gMutex.Unlock()
 	return sb.Hash
 }
 
 // lenSkipBlock returns the actual length using mutexes
 func (s *Service) lenSkipBlocks() int {
-	s.sbMutex.Lock()
-	defer s.sbMutex.Unlock()
+	s.gMutex.Lock()
+	defer s.gMutex.Unlock()
 	return len(s.SkipBlocks)
 }
 
-const skipchainBFT = "SkipchainBFT"
+// saves the actual identity
+func (s *Service) save() {
+	log.Lvl3("Saving service")
+	b, err := network.MarshalRegisteredType(s.SkipBlockMap)
+	if err != nil {
+		log.Error("Couldn't marshal service:", err)
+	} else {
+		err = ioutil.WriteFile(s.path+"/skipchain.bin", b, 0660)
+		if err != nil {
+			log.Error("Couldn't save file:", err)
+		}
+	}
+}
+
+// Tries to load the configuration and updates the data in the service
+// if it finds a valid config-file.
+func (s *Service) tryLoad() error {
+	configFile := s.path + "/skipchain.bin"
+	b, err := ioutil.ReadFile(configFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("Error while reading %s: %s", configFile, err)
+	}
+	if len(b) > 0 {
+		_, msg, err := network.UnmarshalRegistered(b)
+		if err != nil {
+			return fmt.Errorf("Couldn't unmarshal: %s", err)
+		}
+		log.Lvl3("Successfully loaded")
+		s.SkipBlockMap = msg.(*SkipBlockMap)
+	}
+	return nil
+}
 
 func newSkipchainService(c *sda.Context, path string) sda.Service {
 	s := &Service{
 		ServiceProcessor: sda.NewServiceProcessor(c),
 		path:             path,
-		SkipBlocks:       make(map[string]*SkipBlock),
+		SkipBlockMap:     &SkipBlockMap{make(map[string]*SkipBlock)},
+		verifiers:        map[VerifierID]SkipBlockVerifier{},
+	}
+	if err := s.tryLoad(); err != nil {
+		log.Error(err)
 	}
 	for _, msg := range []interface{}{s.ProposeSkipBlock, s.SetChildrenSkipBlock,
 		s.GetUpdateChain} {
 		if err := s.RegisterMessage(msg); err != nil {
 			log.Fatal("Registration error for msg", msg, err)
 		}
+	}
+	if err := s.RegisterVerification(VerifyShard, s.VerifyShardFunc); err != nil {
+		log.Panic(err)
+	}
+	if err := s.RegisterVerification(VerifyNone, s.VerifyNoneFunc); err != nil {
+		log.Panic(err)
 	}
 	return s
 }

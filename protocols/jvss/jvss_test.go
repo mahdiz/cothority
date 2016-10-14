@@ -8,6 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMain(m *testing.M) {
+	log.MainTest(m)
+}
+
 func TestSID(t *testing.T) {
 	sl := newSID(LTSS)
 	ss := newSID(STSS)
@@ -21,21 +25,19 @@ func TestSID(t *testing.T) {
 }
 
 func TestJVSS(t *testing.T) {
-	t.Skip("Does not work for the moment.")
 	// Setup parameters
 	var name string = "JVSS"      // Protocol name
-	var nodes uint32 = 5          // Number of nodes
-	var rounds int = 3            // Number of rounds
+	var nodes uint32 = 16         // Number of nodes
+	var rounds int = 1            // Number of rounds
 	msg := []byte("Hello World!") // Message to-be-signed
 
 	local := sda.NewLocalTest()
-	_, _, tree := local.GenTree(int(nodes), false, true, true)
+	_, _, tree := local.GenTree(int(nodes), true)
+
 	defer local.CloseAll()
 
-	log.TestOutput(testing.Verbose(), 1)
-
 	log.Lvl1("JVSS - starting")
-	leader, err := local.CreateProtocol(tree, name)
+	leader, err := local.CreateProtocol(name, tree)
 	if err != nil {
 		t.Fatal("Couldn't initialise protocol tree:", err)
 	}

@@ -9,9 +9,9 @@ import (
 )
 
 func init() {
-	network.RegisterMessageType(Announce{})
-	network.RegisterMessageType(Reply{})
-	sda.ProtocolRegisterName("ExampleChannels", NewExampleChannels)
+	network.RegisterPacketType(Announce{})
+	network.RegisterPacketType(Reply{})
+	sda.GlobalProtocolRegister("ExampleChannels", NewExampleChannels)
 }
 
 // ProtocolExampleChannels just holds a message that is passed to all children.
@@ -83,7 +83,7 @@ func (p *ProtocolExampleChannels) Dispatch() error {
 			for _, c := range reply {
 				children += c.ChildrenCount
 			}
-			log.Lvl3(p.ServerIdentity().Addresses, "is done with total of", children)
+			log.Lvl3(p.ServerIdentity().Address, "is done with total of", children)
 			if !p.IsRoot() {
 				log.Lvl3("Sending to parent")
 				err := p.SendTo(p.Parent(), &Reply{children})
